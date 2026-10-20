@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>地図メモ</title>
+
+    <!-- ファビコン自動取得エラー(404 Not Found)を防止するダミー設定 -->
+    <link rel="icon" href="data:,">
+
+    <!-- PWA Manifest & Theme -->
+    <link rel="manifest" href="./manifest.json">
+    <link rel="apple-touch-icon" href="./icon-192.png">
+    <meta name="theme-color" content="#1a73e8">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="地図メモ">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="format-detection" content="telephone=no">
+
+    <!-- Leaflet CSS（検索は独自実装になったため、Geocoder の CSS / JS は不要） -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <!-- ピンのまとめ表示（クラスタ）。sw.js のキャッシュ一覧と URL・バージョンを一致させること -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+
+    <style>
+        /* ===== テーマ（ライト / ダーク）。色は変数にまとめ、ダークモードでは変数だけを差し替える ===== */
+        :root {
+            --accent: #1a73e8;      /* ボタンの塗り（白文字を載せる） */
+            --blue: #1a73e8;        /* 文字・リンクの青 */
+            --red: #d93025; --green: #188038;
+            --line: #dadce0; --text: #202124; --sub: #5f6368;
+            --bg: #ffffff; --surface: #ffffff; --surface-2: #f1f3f4; --hover: #f1f6fe; --blue-soft: #e8f0fe;
+            --bar-bg: rgba(255, 255, 255, 0.94); --warn-bg: #fef7e0; --row-line: #eeeeee;
+            --input-bg: #ffffff; --input-line: #cccccc; --shadow: rgba(0, 0, 0, 0.3);
+            color-scheme: light;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root:not([data-theme="light"]) {
+                --accent: #1a73e8; --blue: #8ab4f8; --red: #d93025; --green: #188038;
+                --line: #5f6368; --text: #e8eaed; --sub: #aab0b7;
+                --bg: #202124; --surface: #2d2e31; --surface-2: #3c4043; --hover: #394457; --blue-soft: #2f3b52;
+                --bar-bg: rgba(45, 46, 49, 0.95); --warn-bg: #4a3d12; --row-line: #3c4043;
+                --input-bg: #202124; --input-line: #6b7076; --shadow: rgba(0, 0, 0, 0.6);
+                color-scheme: dark;
+            }
+        }
+        :root[data-theme="dark"] {
+            --accent: #1a73e8; --blue: #8ab4f8; --red: #d93025; --green: #188038;
+            --line: #5f6368; --text: #e8eaed; --sub: #aab0b7;
+            --bg: #202124; --surface: #2d2e31; --surface-2: #3c4043; --hover: #394457; --blue-soft: #2f3b52;
+            --bar-bg: rgba(45, 46, 49, 0.95); --warn-bg: #4a3d12; --row-line: #3c4043;
+            --input-bg: #202124; --input-line: #6b7076; --shadow: rgba(0, 0, 0, 0.6);
+            color-scheme: dark;
+        }
+        :focus-visible { outline: 3px solid #fbbc04; outline-offset: 2px; }
+        .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+        @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        [hidden] { display: none !important; }
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            color: var(--text);
+            background: var(--bg);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Hiragino Sans", "Yu Gothic UI", Meiryo, sans-serif;
+        }
+        #map {
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        /* ===== 画面上部コントロール（検索欄を含む） ===== */
+        .top-bar {
+            position: absolute;
+            top: 10px;
+            left: 50px;
+            right: 10px;
+            z-index: 1000;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            background: var(--bar-bg);
+            padding: 8px;
+            border-radius: 8px;
+            box-shadow: 0 2px 6px var(--shadow);
+        }
+        .top-bar { flex-wrap: nowrap; align-items: flex-start; }
+        #top-bar-body { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+        .top-bar .bar-toggle { flex: 0 0 auto; padding: 6px 10px; font-weight: bold; }
+        /* たたんだ状態: 小さなボタンだけを残す（検索結果も閉じる） */
+        .top-bar.collapsed { right: auto; padding: 4px; }
+        .top-bar.collapsed #top-bar-body { display: none; }
+        .top-bar select, .top-bar button, .top-bar input[type="search"] {
+            padding: 6px 12px;
+            font-size: 13px;
+            border: 1px solid var(--input-line);
+            border-radius: 4px;
+            background: var(--input-bg);
+            color: var(--text);
+            min-height: 36px;
+        }
+        .top-bar select { flex: 1 1 130px; min-width: 0; cursor: pointer; }
+        .top-bar button { cursor: pointer; }
+        .top-bar button:hover { background: var(--surface-2); }
+        
+
+        #search-area { flex: 1 1 100%; position: relative; }
+        #search-form { display: flex; gap: 6px; }
+        #search-input { flex: 1; min-width: 0; font-size: 14px; padding: 8px 10px; }
+        .search-opt { display: inline-flex; align-items: center; gap: 4px; margin-top: 4px; font-size: 12px; color: var(--sub); }
+        #search-results {
+            position: absolute; left: 0; right: 0; top: 100%; margin-top: 6px;
+            background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+            box-shadow: 0 4px 14px var(--shadow); max-height: 50vh; overflow-y: auto;
+        }
+        #search-results ul, #memo-list-body { list-style: none; }
+        .sr-section { padding: 6px 10px; font-size: 12px; font-weight: bold; color: var(--sub); background: var(--surface-2); }
+        .sr-note, .list-note { padding: 10px; font-size: 13px; color: var(--sub); }
+        .sr-item, .memo-list-item {
+            display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+            padding: 8px 10px; background: var(--surface); border: none; border-bottom: 1px solid var(--row-line);
+            font: inherit; color: var(--text); cursor: pointer;
+        }
+        .sr-item:hover, .memo-list-item:hover { background: var(--hover); }
+        .sr-icon { flex: 0 0 auto; }
+        .sr-main, .item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+        .sr-title, .item-text { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .sr-sub { font-size: 11px; color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .sr-dist, .item-dist { flex: 0 0 auto; font-size: 13px; font-weight: bold; color: var(--blue); }
+
+        /* ===== GPSボタン ===== */
+        .gps-btn {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            z-index: 1000;
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            padding: 12px 16px;
+            border-radius: 24px;
+            font-size: 14px;
+            font-weight: bold;
+            box-shadow: 0 2px 8px var(--shadow);
+            cursor: pointer;
+            min-height: 44px;
+        }
+        /* 一覧を開いている間は、GPSボタンを一覧の上に退避 */
+        #memo-list-panel:not([hidden]) ~ .gps-btn { bottom: calc(40vh + 16px); }
+
+        /* ===== カテゴリ別メモ一覧（画面下から出るパネル） ===== */
+        #memo-list-panel {
+            position: absolute; left: 0; right: 0; bottom: 0; z-index: 1000;
+            max-height: 40vh; display: flex; flex-direction: column;
+            background: var(--surface); border-radius: 12px 12px 0 0;
+            box-shadow: 0 -2px 10px var(--shadow);
+            padding-bottom: env(safe-area-inset-bottom);
+        }
+        .list-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+        .list-head strong { flex: 1; font-size: 14px; }
+        .list-head select, .list-head button { font-size: 13px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; }
+        #memo-list-body { overflow-y: auto; }
+        .thumb { flex: 0 0 auto; width: 44px; height: 44px; object-fit: cover; border-radius: 6px; }
+        .thumb.none { display: grid; place-items: center; background: var(--surface-2); font-size: 20px; }
+
+        /* ===== 地図上のボタン・状態表示（main.js が生成） ===== */
+        .map-ctrl-btn, .map-status {
+            font-size: 13px; padding: 7px 10px; border-radius: 6px;
+            background: var(--surface); color: var(--text); border: 1px solid var(--line); box-shadow: 0 1px 4px var(--shadow);
+        }
+        .map-ctrl-btn { color: var(--blue); font-weight: bold; cursor: pointer; }
+        .map-status.offline { background: var(--warn-bg); border-color: #f9ab00; }
+        .poi-icon { font-size: 22px; line-height: 28px; text-align: center; background: none; border: none; }
+
+        /* ===== ポップアップ内（フォーム・メモ表示・周辺施設） ===== */
+        .popup-form h3 { margin: 0 0 10px; font-size: 16px; }
+        .popup-form label { display: block; font-size: 12px; color: var(--sub); margin-bottom: 2px; }
+        .popup-form select, .popup-form textarea {
+            width: 100%; margin-bottom: 10px; padding: 5px; border: 1px solid var(--input-line); border-radius: 4px; font: inherit; background: var(--input-bg); color: var(--text);
+        }
+        .popup-form textarea { height: 64px; resize: none; }
+        .popup-form input[type="file"] { width: 100%; margin-bottom: 10px; }
+        .form-photo { margin-bottom: 6px; }
+        .form-photo img { width: 100%; max-height: 80px; object-fit: cover; border-radius: 4px; }
+        .form-photo span { font-size: 11px; color: var(--sub); }
+        #save-btn {
+            width: 100%; padding: 10px; background: var(--accent); color: #fff;
+            border: none; border-radius: 4px; cursor: pointer; font-size: 14px;
+        }
+        #save-btn:disabled { opacity: .6; cursor: default; }
+        .popup-loading { text-align: center; padding: 10px; }
+
+        .memo-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 6px; color: var(--blue); }
+        .memo-badge { background: var(--blue-soft); color: var(--blue); padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+        .memo-distance { margin: 0 0 6px; font-size: 12px; font-weight: bold; color: var(--blue); }
+        .memo-text { margin: 0 0 8px; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+        .memo-photo { width: 100%; max-height: 150px; object-fit: cover; border-radius: 4px; }
+        .memo-actions { display: flex; justify-content: flex-start; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--row-line); flex-wrap: wrap; gap: 6px; }
+        .memo-actions button, .poi-popup button {
+            color: #fff; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold;
+        }
+        .edit-memo-btn, .add-poi-memo-btn { background: var(--accent); }
+        .move-memo-btn { background: #5f6368; }
+        .delete-memo-btn { background: var(--red); }
+        .poi-popup strong { display: block; margin-bottom: 4px; color: var(--blue); font-size: 13px; }
+
+
+        /* ===== カテゴリ色のピン・道案内リンク ===== */
+        .memo-pin { background: none; border: none; }
+        .memo-pin-wrap { position: relative; width: 32px; height: 42px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.45)); }
+        .pin-glyph { position: absolute; left: 0; top: 6px; width: 32px; text-align: center; font-size: 13px; line-height: 18px; }
+        .nav-link, .leaflet-container a.nav-link {
+            display: inline-block; background: var(--green); color: #fff; text-decoration: none;
+            padding: 5px 10px; border-radius: 4px; font-size: 12px; font-weight: bold;
+        }
+        .poi-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+        .category-color-input { flex: 0 0 34px; width: 34px; height: 30px; padding: 0; border: 1px solid var(--input-line); border-radius: 4px; background: var(--input-bg); cursor: pointer; }
+
+        /* ===== 思い出ビュー ===== */
+        #memories-panel {
+            position: fixed; inset: 0; z-index: 2100; display: flex; flex-direction: column;
+            background: var(--bg); color: var(--text); padding-top: env(safe-area-inset-top);
+        }
+        .mem-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: var(--accent); color: #fff; font-size: 16px; }
+        .mem-head button { background: #fff; color: #1a73e8; border: none; border-radius: 6px; padding: 5px 10px; font-size: 14px; cursor: pointer; }
+        #memories-body { flex: 1; overflow-y: auto; padding: 12px 14px calc(24px + env(safe-area-inset-bottom)); max-width: 720px; width: 100%; margin: 0 auto; }
+        .mem-empty { padding: 24px 4px; color: var(--sub); line-height: 1.7; }
+        .mem-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
+        .mem-stat { background: var(--hover); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 2px; }
+        .mem-stat b { font-size: 20px; color: var(--blue); }
+        .mem-stat:last-child b { font-size: 14px; line-height: 26px; }
+        .mem-stat span { font-size: 12px; color: var(--sub); }
+        .mem-h { margin: 18px 0 8px; font-size: 14px; }
+        .cat-bars { display: flex; flex-direction: column; gap: 4px; }
+        .cat-bar { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; font: inherit; color: var(--text); text-align: left; cursor: pointer; }
+        .cat-bar:disabled { cursor: default; }
+        .cat-bar:not(:disabled):hover { background: var(--hover); }
+        .cat-bar-label { flex: 0 0 38%; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .cat-bar-track { flex: 1; height: 10px; background: var(--surface-2); border-radius: 5px; overflow: hidden; }
+        .cat-bar-fill { display: block; height: 100%; border-radius: 5px; }
+        .cat-bar-n { flex: 0 0 auto; min-width: 2ch; text-align: right; font-size: 13px; font-weight: bold; }
+        .mem-month { margin: 14px 0 4px; padding: 4px 8px; font-size: 13px; font-weight: bold; color: var(--sub); background: var(--surface-2); border-radius: 4px; position: sticky; top: 0; z-index: 1; }
+        .mem-list { list-style: none; }
+        .memory-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 8px 4px; background: var(--surface); border: none; border-bottom: 1px solid var(--row-line); font: inherit; color: var(--text); cursor: pointer; }
+        .memory-item:hover { background: var(--hover); }
+        .item-meta { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--sub); }
+        .cat-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; }
+
+        /* ===== モーダルダイアログ（カテゴリ管理） ===== */
+        .modal {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 2000;
+            background: var(--surface);
+            color: var(--text);
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px var(--shadow);
+            width: 340px;
+            max-width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1999;
+        }
+        .category-item { display: flex; gap: 6px; margin-bottom: 8px; }
+        .category-item input[type="text"] { flex: 1; min-width: 0; padding: 4px; background: var(--input-bg); color: var(--text); border: 1px solid var(--input-line); border-radius: 4px; }
+        .delete-cat-btn { color: var(--red); }
+    
+        /* ===== 追加分: 通知・お気に入り・評価・設定画面・ダーク地図 ===== */
+        #toast-area {
+            position: fixed; left: 50%; transform: translateX(-50%); z-index: 3000;
+            bottom: calc(76px + env(safe-area-inset-bottom)); width: min(92vw, 440px);
+            display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+        }
+        .toast {
+            pointer-events: auto; display: flex; align-items: center; gap: 10px;
+            padding: 10px 12px; border-radius: 8px; font-size: 14px; line-height: 1.5;
+            background: #323232; color: #fff; box-shadow: 0 3px 10px rgba(0,0,0,.4);
+            border-left: 6px solid #8ab4f8;
+        }
+        .toast-ok { border-left-color: #81c995; }
+        .toast-warn { border-left-color: #fdd663; }
+        .toast-error { border-left-color: #f28b82; }
+        .toast-text { flex: 1; word-break: break-word; }
+        .toast button { flex: 0 0 auto; background: none; border: 1px solid #8ab4f8; color: #8ab4f8; border-radius: 4px; padding: 5px 10px; font-size: 13px; font-weight: bold; cursor: pointer; min-height: 32px; }
+        .toast .toast-close { border: none; color: #fff; padding: 5px 8px; }
+
+        .pin-fav { position: absolute; right: -3px; top: -3px; font-size: 15px; line-height: 15px; color: #f9ab00; text-shadow: 0 0 2px #000, 0 0 2px #000; }
+        .memo-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 4px; font-size: 12px; color: var(--sub); }
+        .fav-tag { color: #b06000; font-weight: bold; }
+        :root[data-theme="dark"] .fav-tag { color: #fdd663; }
+        @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .fav-tag { color: #fdd663; } }
+        .rating { color: #e37400; letter-spacing: 1px; }
+        .item-meta .rating, .item-meta .fav-tag { font-size: 11px; }
+        .inline-check { display: inline-flex !important; align-items: center; gap: 4px; font-size: 13px !important; color: var(--text) !important; }
+        .form-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+        .form-row select { width: auto !important; margin-bottom: 0 !important; }
+        .form-hint { margin: -4px 0 8px; font-size: 11px; color: var(--sub); }
+        .popup-form input[type="date"] { width: 100%; margin-bottom: 10px; padding: 5px; border: 1px solid var(--input-line); border-radius: 4px; font: inherit; background: var(--input-bg); color: var(--text); }
+
+        .search-opt, .fav-opt { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--sub); }
+        .fav-opt { align-self: center; }
+
+        .settings-sec { margin-bottom: 16px; }
+        .settings-sec h4 { margin-bottom: 6px; font-size: 14px; }
+        .settings-sec p, .settings-sec .note { font-size: 12px; color: var(--sub); line-height: 1.6; margin-bottom: 6px; }
+        .settings-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+        .settings-row button, .settings-sec select, .modal button { padding: 7px 10px; font-size: 13px; border: 1px solid var(--input-line); border-radius: 6px; background: var(--surface-2); color: var(--text); cursor: pointer; min-height: 36px; }
+        .settings-sec select { width: 100%; background: var(--input-bg); }
+        .settings-row .primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+        .settings-row .danger { color: var(--red); }
+        #storage-bar { width: 100%; height: 10px; }
+        #settings-modal { width: 380px; }
+
+        /* ダークモードでは地図の色を反転（航空写真は除く） */
+        .leaflet-container.dark-tiles .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.95) contrast(.9); }
+        .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--surface); color: var(--text); }
+        .leaflet-popup-close-button { color: var(--sub) !important; }
+        .leaflet-bar a, .leaflet-bar a:hover { background-color: var(--surface); color: var(--text); border-bottom-color: var(--line); }
+        .leaflet-control-attribution { background: var(--bar-bg) !important; color: var(--sub); }
+        .leaflet-control-attribution a { color: var(--blue); }
+        .leaflet-container a.nav-link { color: #fff; }
+        .modal .delete-cat-btn { color: var(--red); }
+
+        /* =====================================================================
+           スマートフォン向け
+           ===================================================================== */
+        html, body { height: 100%; height: 100dvh; }            /* アドレスバーの出入りに追従 */
+        body { overscroll-behavior: none; -webkit-text-size-adjust: 100%; }
+        button, a, label, select, input, summary { touch-action: manipulation; } /* ダブルタップ拡大を防ぐ */
+        * { -webkit-tap-highlight-color: rgba(26, 115, 232, 0.18); }
+
+        .menu-row { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        .top-bar { top: calc(10px + env(safe-area-inset-top)); right: calc(10px + env(safe-area-inset-right)); left: calc(50px + env(safe-area-inset-left)); }
+        .gps-btn { bottom: calc(20px + env(safe-area-inset-bottom)); right: calc(16px + env(safe-area-inset-right)); }
+        #memo-list-panel:not([hidden]) ~ .gps-btn { bottom: calc(40dvh + 16px); }
+        #memo-list-panel { max-height: 40dvh; }
+        .leaflet-popup-content { max-height: 55dvh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+        .modal { max-height: 85dvh; width: min(92vw, 380px); }
+        #settings-modal { width: min(92vw, 400px); }
+        .leaflet-bottom.leaflet-left { margin-left: env(safe-area-inset-left); margin-bottom: env(safe-area-inset-bottom); }
+        .map-status { max-width: calc(100vw - 190px); }
+
+        /* 指で操作する端末: ボタンを大きく（目安: 縦横 40〜44px 以上） */
+        @media (pointer: coarse) {
+            .top-bar button, .top-bar select, .top-bar input[type="search"] { min-height: 44px; }
+            .list-head button, .list-head select { min-height: 40px; }
+            .gps-btn { min-height: 48px; }
+            .memo-actions button, .poi-popup button, .nav-link, .leaflet-container a.nav-link { min-height: 40px; padding: 8px 12px; font-size: 14px; }
+            .popup-form input[type="date"], .popup-form select, .popup-form textarea { min-height: 40px; }
+            #save-btn { min-height: 44px; font-size: 16px; }
+            input[type="checkbox"] { width: 22px; height: 22px; }
+            .leaflet-bar a { width: 40px; height: 40px; line-height: 40px; }
+            .leaflet-touch .leaflet-bar a { width: 40px; height: 40px; line-height: 40px; }
+            .leaflet-popup-close-button { width: 40px !important; height: 40px !important; font-size: 26px !important; line-height: 40px !important; }
+            .sr-item, .memo-list-item, .memory-item { min-height: 52px; }
+            .map-ctrl-btn { min-height: 40px; }
+            .settings-row button, .settings-sec select, .modal button { min-height: 44px; }
+        }
+
+        @media (max-width: 600px) {
+            /* iPhone は 16px 未満の入力欄に触れると画面が勝手に拡大されるため、16px にそろえる */
+            input:not([type="checkbox"]):not([type="file"]), select, textarea { font-size: 16px !important; }
+            .top-bar { padding: 6px; gap: 6px; }
+            #top-bar-body { flex-direction: column; flex-wrap: nowrap; gap: 6px; }
+            #search-area { order: -1; flex: 0 0 auto; }
+            /* ボタン列は 1 行で横にスクロール（画面を縦に占領しない） */
+            .menu-row { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; padding-bottom: 2px; }
+            .menu-row::-webkit-scrollbar { display: none; }
+            .menu-row > * { flex: 0 0 auto; white-space: nowrap; }
+            .menu-row select { flex: 0 0 auto; width: 150px; }
+            #search-results { max-height: 45dvh; }
+            .search-opt { font-size: 12px; }
+            .toast { font-size: 14px; }
+            #toast-area { bottom: calc(84px + env(safe-area-inset-bottom)); }
+            #memories-body { padding-left: calc(14px + env(safe-area-inset-left)); padding-right: calc(14px + env(safe-area-inset-right)); }
+        }
+        /* 横向きのスマホ（高さが小さい） */
+        @media (max-height: 480px) {
+            .leaflet-popup-content { max-height: 70dvh; }
+            #memo-list-panel { max-height: 55dvh; }
+            #memo-list-panel:not([hidden]) ~ .gps-btn { bottom: calc(55dvh + 16px); }
+            #search-results { max-height: 50dvh; }
+        }
+    </style>
+</head>
+<body>
+    <h1 class="sr-only">地図メモ</h1>
+
+    <!-- 画面上部コントロール -->
+    <div class="top-bar" id="top-bar">
+        <button type="button" id="top-bar-toggle" class="bar-toggle" aria-expanded="true" aria-controls="top-bar-body" aria-label="メニューをたたむ">▲</button>
+        <div id="top-bar-body">
+        <div class="menu-row">
+            <select id="category-filter" aria-label="カテゴリで絞り込む">
+                <option value="all">すべてのカテゴリ</option>
+            </select>
+            <label class="fav-opt"><input type="checkbox" id="fav-only"> ⭐ お気に入りのみ</label>
+            <button type="button" id="category-mgmt-btn">カテゴリ管理</button>
+            <button type="button" id="memo-list-btn" aria-expanded="false" aria-controls="memo-list-panel">📋 一覧</button>
+            <button type="button" id="memories-btn">🗓️ 思い出</button>
+            <button type="button" id="settings-btn" aria-label="設定（バックアップ・表示・容量）">⚙️ 設定</button>
+        </div>
+
+        <div id="search-area">
+            <form id="search-form" role="search">
+                <input type="search" id="search-input" aria-label="メモ・施設名・地名・座標を検索" placeholder="メモ・施設名・地名・緯度,経度を検索" autocomplete="off" enterkeyhint="search">
+                <button type="submit">検索</button>
+            </form>
+            <label class="search-opt"><input type="checkbox" id="search-bounded"> 表示範囲内だけを検索（場所・施設）</label>
+            <div id="search-results" aria-live="polite" hidden></div>
+        </div>
+        </div>
+    </div>
+
+    <!-- 地図表示領域 -->
+    <div id="map" role="region" aria-label="地図"></div>
+
+    <!-- カテゴリ別メモ一覧。GPSボタンより前に置くこと（CSSの兄弟セレクタのため） -->
+    <section id="memo-list-panel" aria-label="保存したメモの一覧" hidden>
+        <div class="list-head">
+            <strong id="memo-list-title">メモ一覧</strong>
+            <select id="memo-list-sort" aria-label="並び順">
+                <option value="distance">近い順</option>
+                <option value="recent">新しい順</option>
+                <option value="rating">評価順</option>
+            </select>
+            <button type="button" id="memo-list-order" aria-label="並びの向きを切り替える">昇順 ↑</button>
+            <button type="button" id="memo-list-close" aria-label="一覧を閉じる">✕</button>
+        </div>
+        <ul id="memo-list-body"></ul>
+    </section>
+
+    <!-- 思い出ビュー（全画面） -->
+    <section id="memories-panel" aria-label="思い出" hidden>
+        <header class="mem-head">
+            <strong>🗓️ 思い出</strong>
+            <button type="button" id="memories-close" aria-label="思い出を閉じる">✕</button>
+        </header>
+        <div id="memories-body"></div>
+    </section>
+
+    <!-- GPS現在地記録ボタン -->
+    <button type="button" id="gps-btn" class="gps-btn">📍 現在地にメモ</button>
+
+    <!-- 通知（トースト）。画面読み上げにも対応 -->
+    <div id="toast-area" aria-live="polite" aria-atomic="false"></div>
+
+    <!-- モーダル共通の暗幕 -->
+    <div class="modal-overlay" id="modal-overlay" hidden></div>
+
+    <!-- カテゴリ管理用モーダル -->
+    <div class="modal" id="category-modal" role="dialog" aria-modal="true" aria-labelledby="category-modal-title" hidden>
+        <h3 id="category-modal-title" style="margin-bottom: 12px; font-size: 16px;">カテゴリの管理</h3>
+        <div id="category-list-container"></div>
+        <hr style="margin: 12px 0;">
+        <div style="display: flex; gap: 6px;">
+            <input type="text" id="new-category-input" aria-label="新しいカテゴリ名" placeholder="新しいカテゴリ名" style="flex: 1; padding: 4px; background: var(--input-bg); color: var(--text); border: 1px solid var(--input-line); border-radius: 4px;">
+            <button type="button" id="add-category-btn" style="padding: 4px 8px;">追加</button>
+        </div>
+        <button type="button" id="close-modal-btn" style="margin-top: 16px; width: 100%;">閉じる</button>
+    </div>
+
+    <!-- 設定モーダル -->
+    <div class="modal" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
+        <h3 id="settings-title" style="margin-bottom: 12px; font-size: 16px;">設定</h3>
+
+        <div class="settings-sec">
+            <h4>保存容量</h4>
+            <p id="storage-info">確認中...</p>
+            <progress id="storage-bar" max="1" value="0" hidden aria-label="保存容量の使用率"></progress>
+            <div class="settings-row">
+                <button type="button" id="clear-tiles-btn" class="danger">保存した地図を削除（メモは残ります）</button>
+            </div>
+        </div>
+
+        <div class="settings-sec">
+            <h4>バックアップ</h4>
+            <p>端末の故障やブラウザのデータ削除に備えて、ときどき書き出して保管してください。</p>
+            <div class="settings-row">
+                <button type="button" id="export-json-btn" class="primary">バックアップを書き出す（写真つき）</button>
+                <button type="button" id="import-btn">バックアップを読み込む</button>
+                <input type="file" id="import-file" accept="application/json,.json" hidden>
+            </div>
+            <p class="note">読み込みでは、すでにあるメモは重複させず、足りないものだけを追加します。</p>
+            <p class="note">他のアプリで使う形式（写真は含みません）:</p>
+            <div class="settings-row">
+                <button type="button" id="export-geojson-btn">GeoJSON</button>
+                <button type="button" id="export-gpx-btn">GPX</button>
+                <button type="button" id="export-kml-btn">KML</button>
+            </div>
+        </div>
+
+        <div class="settings-sec">
+            <h4>表示</h4>
+            <label for="theme-select" class="note">テーマ</label>
+            <select id="theme-select">
+                <option value="auto">端末の設定に合わせる</option>
+                <option value="light">ライト</option>
+                <option value="dark">ダーク</option>
+            </select>
+            <label for="layer-select" class="note" style="display:block;margin-top:8px;">地図の種類</label>
+            <select id="layer-select">
+                <option value="osm">標準（OpenStreetMap）</option>
+                <option value="gsi-pale">淡色地図（国土地理院）</option>
+                <option value="gsi-photo">航空写真（国土地理院・ズーム14以上）</option>
+            </select>
+        </div>
+
+        <div class="settings-sec">
+            <h4>アプリ</h4>
+            <p id="install-note"></p>
+            <div class="settings-row">
+                <button type="button" id="install-btn" class="primary" hidden>ホーム画面に追加</button>
+                <button type="button" id="update-check-btn">更新を確認</button>
+            </div>
+            <p class="note" id="app-version"></p>
+        </div>
+
+        <button type="button" id="settings-close" style="width: 100%;">閉じる</button>
+    </div>
+
+    <!-- 外部ライブラリ（sw.js のキャッシュ一覧と URL・バージョンを一致させること） -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+    <script src="https://unpkg.com/dexie@3.2.4/dist/dexie.js"></script>
+
+    <!-- アプリケーションスクリプト -->
+    <script src="./main.js"></script>
+</body>
+</html>

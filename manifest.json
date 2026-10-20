@@ -1,0 +1,27 @@
+{
+  "id": "./index.html",
+  "short_name": "地図メモ",
+  "name": "地図連動型写真メモアプリ",
+  "description": "地図上の位置に写真とメモを保存できる、オフライン対応のアプリ",
+  "lang": "ja",
+  "icons": [
+    {
+      "src": "./icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any"
+    }
+  ],
+  "start_url": "./index.html",
+  "scope": "./",
+  "background_color": "#1a73e8",
+  "theme_color": "#1a73e8",
+  "display": "standalone",
+  "orientation": "any"
+}
